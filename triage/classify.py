@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from triage.config import ROOT, Settings, get_settings, load_taxonomy, load_tie_breaks
+from triage.qwen import QwenClient, thinking_params
 from triage.rules import apply_rules, mask_cards
 from triage.schemas import ModelOutput
 
@@ -44,23 +45,22 @@ def parse_output(raw: str) -> ModelOutput:
 
 
 class ModelEmpty(Exception):
-    """The model answered with no text at all (blocked, or chose not to answer)."""
+    """The model answered with no text at all (token budget spent on thinking, a block, or a refusal)."""
 
 
-def call_model(client: Any, model: str, system: str, user: str) -> ModelOutput:
-    resp = client.messages.create(
-        model=model, max_tokens=2000, system=system,
-        messages=[{"role": "user", "content": user}],
-    )
-    text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
-    if not text.strip():
-        # Never log the content. The stop reason tells a provider block from the model declining.
-        usage = getattr(resp, "usage", None)
-        log.warning("model_empty: model=%s stop_reason=%s blocks=%s output_tokens=%s", model,
-                    getattr(resp, "stop_reason", None), [getattr(b, "type", "?") for b in resp.content],
-                    getattr(usage, "output_tokens", None))
-        raise ModelEmpty(f"stop_reason={getattr(resp, 'stop_reason', None)}")
-    return parse_output(text)
+def _thinking_for(settings: Settings, model: str) -> dict:
+    mode = settings.backup_thinking_mode if model == settings.backup_model else settings.thinking_mode
+    return thinking_params(mode, settings.thinking_budget)
+
+
+def call_model(client: Any, settings: Settings, model: str, system: str, user: str) -> ModelOutput:
+    reply = client.complete(model, system, user, settings.max_tokens, _thinking_for(settings, model))
+    if not reply.text.strip():
+        # Never log the content. The finish reason tells a spent token budget ("length") from a decline.
+        log.warning("model_empty: model=%s finish_reason=%s output_tokens=%s reasoning_tokens=%s", model,
+                    reply.finish_reason, reply.output_tokens, reply.reasoning_tokens)
+        raise ModelEmpty(f"finish_reason={reply.finish_reason}")
+    return parse_output(reply.text)
 
 
 def _attempts(settings: Settings, with_context: str, plain: str) -> list[tuple[str, str]]:
@@ -84,7 +84,7 @@ def run_chain(client: Any, settings: Settings, system: str, with_context: str,
         if primary_down and model == settings.classifier_model:
             continue
         try:
-            return call_model(client, model, system, user), user, None
+            return call_model(client, settings, model, system, user), user, None
         except ModelEmpty:
             kinds.append("model_empty")
         except (ValueError, ValidationError) as exc:
@@ -99,10 +99,9 @@ def run_chain(client: Any, settings: Settings, system: str, with_context: str,
     return None, plain, "parse_failed" if "parse_failed" in kinds else "model_empty"
 
 
-def make_client(settings: Settings) -> Any:
-    """Builds the SDK client for the Qwen endpoint from QWEN_API_KEY and QWEN_BASE_URL."""
-    import anthropic  # the SDK is only the transport; the endpoint serves Qwen models
-    return anthropic.Anthropic(api_key=settings.api_key, base_url=settings.base_url or None)
+def make_client(settings: Settings) -> QwenClient:
+    """Builds the client for the Qwen endpoint from QWEN_API_KEY and QWEN_BASE_URL."""
+    return QwenClient(settings.api_key, settings.base_url)
 
 
 def classify(message: str, context: dict[str, Any] | None = None, client: Any = None,
@@ -134,7 +133,7 @@ def classify(message: str, context: dict[str, Any] | None = None, client: Any = 
         return result
     if out.confidence < settings.confidence_cutoff and settings.backup_model:
         try:  # second opinion; if the backup fails, keep the first answer
-            out = call_model(client, settings.backup_model, system, used_prompt)
+            out = call_model(client, settings, settings.backup_model, system, used_prompt)
         except Exception as exc:
             log.warning("low-confidence recheck failed: %s", type(exc).__name__)
 

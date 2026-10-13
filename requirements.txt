@@ -1,5 +1,4 @@
 pydantic>=2
-anthropic>=0.40  # transport only; the endpoint serves Qwen models
 pytest>=8
 fastapi
 uvicorn

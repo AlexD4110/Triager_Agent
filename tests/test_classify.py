@@ -1,8 +1,7 @@
 import json
-from types import SimpleNamespace
-
 from triage.classify import build_system_prompt, classify, parse_output
 from triage.config import Settings
+from triage.qwen import Reply
 
 SETTINGS = Settings("small", "big", 0.6)
 
@@ -14,19 +13,19 @@ def good(category="payment_issue", confidence=0.9, **kw):
 
 
 class Stub:
-    """Fake client: returns queued replies (strings) or raises queued exceptions, recording calls."""
+    """Fake client: queued replies (JSON strings, None for an empty reply) or exceptions, recording calls."""
 
     def __init__(self, *replies):
         self.replies, self.calls = list(replies), []
-        self.messages = self
 
-    def create(self, **kw):
-        self.calls.append(kw)
+    def complete(self, model, system, user, max_tokens=2000, thinking=None):
+        self.calls.append({"model": model, "system": system, "user": user, "max_tokens": max_tokens,
+                           "thinking": thinking})
         item = self.replies.pop(0)
         if isinstance(item, Exception):
             raise item
-        blocks = [SimpleNamespace(type="text", text=item)] if item is not None else [SimpleNamespace(type="thinking")]
-        return SimpleNamespace(content=blocks, stop_reason="end_turn", usage=SimpleNamespace(output_tokens=7))
+        return Reply(text=item or "", finish_reason="stop" if item else "length", prompt_tokens=10,
+                     output_tokens=7, reasoning_tokens=0, seconds=0.0)
 
 
 def test_parses_fenced_and_think_output():
@@ -89,7 +88,7 @@ def test_primary_down_uses_backup():
 def test_card_numbers_masked_before_model():
     stub = Stub(good())
     classify("charged on 4111 1111 1111 1111 twice", client=stub, settings=SETTINGS)
-    sent = stub.calls[0]["messages"][0]["content"]
+    sent = stub.calls[0]["user"]
     assert "4111" not in sent and "[CARD]" in sent
 
 
@@ -106,7 +105,7 @@ HISTORY = {"recent_messages": ["Some days I think everyone would be better witho
 def test_empty_reply_is_retried_without_sender_history():
     stub = Stub(None, good("gift_failed_live"))  # None = reply with no text block
     res = classify("my gift never showed", HISTORY, client=stub, settings=SETTINGS)
-    first, second = (c["messages"][0]["content"] for c in stub.calls)
+    first, second = (c["user"] for c in stub.calls)
     assert "better without me" in first and "better without me" not in second
     assert res["fallback"] is None and res["category"] == "gift_failed_live"
 
@@ -122,7 +121,7 @@ def test_all_empty_is_model_empty_not_parse_failed(caplog):
     with caplog.at_level("WARNING", logger="classify"):
         res = classify("my gift never showed", HISTORY, client=stub, settings=SETTINGS)
     assert res["fallback"] == "model_empty"
-    assert "stop_reason=end_turn" in caplog.text and "better without me" not in caplog.text
+    assert "finish_reason=length" in caplog.text and "better without me" not in caplog.text
 
 
 def test_model_empty_keeps_rule_flags_and_priority_floor():
@@ -143,3 +142,11 @@ def test_failed_low_confidence_recheck_keeps_first_answer():
     stub = Stub(good(confidence=0.3), RuntimeError("down"))
     res = classify("got charged twice", client=stub, settings=SETTINGS)
     assert res["category"] == "payment_issue" and res["fallback"] == "low_confidence"
+
+
+def test_thinking_mode_is_sent_per_model():
+    stub = Stub(good(confidence=0.3), good())
+    settings = Settings("small", "big", 0.6, thinking_mode="off", backup_thinking_mode="budget", thinking_budget=64)
+    classify("got charged twice", client=stub, settings=settings)
+    assert stub.calls[0]["thinking"] == {"enable_thinking": False}
+    assert stub.calls[1]["thinking"] == {"enable_thinking": True, "thinking_budget": 64}

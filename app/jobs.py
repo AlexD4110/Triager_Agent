@@ -7,6 +7,7 @@ from app.store import Db
 MAX_JOB_ATTEMPTS = 3
 MAX_ALERT_ATTEMPTS = 5
 STALE_MINUTES = 5
+SAFETY_HISTORY_HOURS = 24
 
 
 def _now() -> str:
@@ -66,6 +67,20 @@ def recent_texts(conn: Db, wa_from: str, before_id: int, limit: int = 3) -> list
         (wa_from, before_id, limit),
     )
     return [r[0] for r in reversed(cur.fetchall())]
+
+
+def has_recent_safety_flag(conn: Db, wa_from: str, before_id: int, hours: int = SAFETY_HISTORY_HOURS) -> bool:
+    """True if this sender had an earlier message flagged for safety (rule or model flag, or the safety
+    category) within `hours`. Results that were themselves fallbacks never count, so a history flag cannot
+    keep passing itself along."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    row = conn.execute(
+        "SELECT 1 FROM triage_results r JOIN messages m ON m.id = r.message_id"
+        " WHERE m.wa_from = ? AND m.id < ? AND m.received_at >= ? AND r.fallback IS NULL"
+        " AND (r.safety_flag = 1 OR r.category = 'safety') LIMIT 1",
+        (wa_from, before_id, cutoff),
+    ).fetchone()
+    return row is not None
 
 
 def get_gifter(conn: Db, wa_id: str) -> dict[str, Any] | None:
