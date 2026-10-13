@@ -12,11 +12,13 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import PlainTextResponse
 
 from app import store
+from app.policy_pages import router as policy_router
 from triage.config import load_dotenv
 
 load_dotenv()
 log = logging.getLogger("webhook")
 app = FastAPI(title="Gifter Triage webhook")
+app.include_router(policy_router)
 
 
 def verify_signature(secret: str, body: bytes, header: str | None) -> bool:
