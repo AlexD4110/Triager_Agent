@@ -54,3 +54,10 @@ def test_fallbacks():
     assert prioritize(r(None, fallback="parse_failed"), None, None)[0] == "P1"
     assert prioritize(r(None, fallback="model_down"), None, None)[0] == "P2"
     assert prioritize(r("payment_issue", fallback="low_confidence"), None, None)[0] == "P2"
+
+
+def test_host_matching_is_case_and_at_sign_insensitive():
+    res = r("vip_request", mentions_host=" @MIRA ")
+    assert prioritize(res, None, {"Mira": True})[0] == "P1"
+    assert prioritize(res, None, {"mira": True})[0] == "P1"
+    assert prioritize(r("vip_request", mentions_host="Tomas"), None, {"mira": True})[0] == "P2"

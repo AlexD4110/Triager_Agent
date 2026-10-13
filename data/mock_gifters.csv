@@ -1,0 +1,11 @@
+wa_id,name,tier,hosts
+15555550101,Mock Gifter One,top,mira
+15555550102,Mock Gifter Two,top,tomas;mira
+15555550103,Mock Gifter Three,top,lena
+15555550104,Mock Gifter Four,mid,mira
+15555550105,Mock Gifter Five,mid,ravi
+15555550106,Mock Gifter Six,mid,sofia
+15555550107,Mock Gifter Seven,standard,tomas
+15555550108,Mock Gifter Eight,standard,lena
+15555550109,Mock Gifter Nine,standard,ravi
+15555550110,Mock Gifter Ten,standard,sofia
