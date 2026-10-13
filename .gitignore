@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.db
+
+# Kept local on purpose: taxonomy, prompts, and labeled data are not published
+categories.yaml
+triage/prompts/
+data/labeled_messages.csv
+data/eval_history.json
+tools/build_dataset.py
