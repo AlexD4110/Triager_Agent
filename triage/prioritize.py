@@ -13,7 +13,7 @@ DEADLINE_MIN = {"P0": 5, "P1": 30, "P2": 240, "P3": 1440}
 TOP_P1_DEADLINE = 15
 LIVE_GIFT_DEADLINE = 10
 REPEAT_THRESHOLD = 3
-FALLBACK_PRIORITY = {"parse_failed": "P1", "low_confidence": "P2", "model_down": "P2"}
+FALLBACK_PRIORITY = {"parse_failed": "P1", "model_empty": "P1", "low_confidence": "P2", "model_down": "P2"}
 
 _BASE = {name: info["base_priority"] for name, info in load_taxonomy().items()}
 

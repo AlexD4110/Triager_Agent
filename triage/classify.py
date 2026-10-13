@@ -1,5 +1,6 @@
 """classify(message, context) -> dict. Rules first, then the model, then validation and fallbacks."""
 import json
+import logging
 import re
 from typing import Any
 
@@ -9,6 +10,7 @@ from triage.config import ROOT, Settings, get_settings, load_taxonomy, load_tie_
 from triage.rules import apply_rules, mask_cards
 from triage.schemas import ModelOutput
 
+log = logging.getLogger("classify")
 PROMPT_DIR = ROOT / "triage" / "prompts"
 
 
@@ -41,21 +43,60 @@ def parse_output(raw: str) -> ModelOutput:
     return ModelOutput.model_validate(json.loads(raw[start:end + 1]))
 
 
+class ModelEmpty(Exception):
+    """The model answered with no text at all (blocked, or chose not to answer)."""
+
+
 def call_model(client: Any, model: str, system: str, user: str) -> ModelOutput:
     resp = client.messages.create(
         model=model, max_tokens=2000, system=system,
         messages=[{"role": "user", "content": user}],
     )
     text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+    if not text.strip():
+        # Never log the content. The stop reason tells a provider block from the model declining.
+        usage = getattr(resp, "usage", None)
+        log.warning("model_empty: model=%s stop_reason=%s blocks=%s output_tokens=%s", model,
+                    getattr(resp, "stop_reason", None), [getattr(b, "type", "?") for b in resp.content],
+                    getattr(usage, "output_tokens", None))
+        raise ModelEmpty(f"stop_reason={getattr(resp, 'stop_reason', None)}")
     return parse_output(text)
 
 
-def _run(client: Any, model: str, system: str, user: str) -> ModelOutput:
-    """One call, and one retry if the JSON does not parse or validate."""
-    try:
-        return call_model(client, model, system, user)
-    except (ValueError, ValidationError):
-        return call_model(client, model, system, user)
+def _attempts(settings: Settings, with_context: str, plain: str) -> list[tuple[str, str]]:
+    """The order tried: primary with sender history, primary without it, then the backup without it."""
+    steps = [(settings.classifier_model, with_context), (settings.classifier_model, plain)]
+    if settings.backup_model:
+        steps.append((settings.backup_model, plain))
+    return steps
+
+
+def run_chain(client: Any, settings: Settings, system: str, with_context: str,
+              plain: str) -> tuple[ModelOutput | None, str, str | None]:
+    """Returns (output, user prompt that worked, failure kind). Kind is model_empty, parse_failed or model_down.
+
+    An unreachable primary skips straight to the backup. Empty and unparseable replies get a second try
+    without the sender's earlier messages, because that history can derail the model.
+    """
+    kinds: list[str] = []
+    primary_down = False
+    for model, user in _attempts(settings, with_context, plain):
+        if primary_down and model == settings.classifier_model:
+            continue
+        try:
+            return call_model(client, model, system, user), user, None
+        except ModelEmpty:
+            kinds.append("model_empty")
+        except (ValueError, ValidationError) as exc:
+            log.warning("parse_failed: model=%s %s: %s", model, type(exc).__name__, str(exc)[:150])
+            kinds.append("parse_failed")
+        except Exception as exc:  # network or API outage
+            log.warning("model_down: model=%s %s: %s", model, type(exc).__name__, str(exc)[:150])
+            kinds.append("model_down")
+            primary_down = primary_down or model == settings.classifier_model
+    if all(k == "model_down" for k in kinds):
+        return None, plain, "model_down"
+    return None, plain, "parse_failed" if "parse_failed" in kinds else "model_empty"
 
 
 def make_client(settings: Settings) -> Any:
@@ -84,25 +125,18 @@ def classify(message: str, context: dict[str, Any] | None = None, client: Any = 
 
     if client is None:
         client = make_client(settings)
-    system, user = build_system_prompt(), build_user_prompt(text, context)
+    system = build_system_prompt()
+    with_context, plain = build_user_prompt(text, context), build_user_prompt(text, {})
 
-    try:
-        try:
-            out = _run(client, settings.classifier_model, system, user)
-        except (ValueError, ValidationError):
-            raise
-        except Exception:  # primary model unreachable: try the backup before giving up
-            if not settings.backup_model:
-                raise
-            out = _run(client, settings.backup_model, system, user)
-        if out.confidence < settings.confidence_cutoff and settings.backup_model:
-            out = _run(client, settings.backup_model, system, user)
-    except (ValueError, ValidationError):
-        result["fallback"] = "parse_failed"
+    out, used_prompt, failure = run_chain(client, settings, system, with_context, plain)
+    if out is None:
+        result["fallback"] = failure
         return result
-    except Exception:  # both models unreachable: rules-only result
-        result["fallback"] = "model_down"
-        return result
+    if out.confidence < settings.confidence_cutoff and settings.backup_model:
+        try:  # second opinion; if the backup fails, keep the first answer
+            out = call_model(client, settings.backup_model, system, used_prompt)
+        except Exception as exc:
+            log.warning("low-confidence recheck failed: %s", type(exc).__name__)
 
     data = out.model_dump()
     # Rule flags can only be added to, never removed.

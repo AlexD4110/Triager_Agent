@@ -25,7 +25,8 @@ class Stub:
         item = self.replies.pop(0)
         if isinstance(item, Exception):
             raise item
-        return SimpleNamespace(content=[SimpleNamespace(type="text", text=item)])
+        blocks = [SimpleNamespace(type="text", text=item)] if item is not None else [SimpleNamespace(type="thinking")]
+        return SimpleNamespace(content=blocks, stop_reason="end_turn", usage=SimpleNamespace(output_tokens=7))
 
 
 def test_parses_fenced_and_think_output():
@@ -49,10 +50,10 @@ def test_model_can_add_flag():
     assert res["safety_flag"] is True
 
 
-def test_retry_once_then_parse_failed():
-    stub = Stub("nonsense", "still nonsense")
+def test_unparseable_every_time_tries_primary_again_then_backup_then_parse_failed():
+    stub = Stub("nonsense", "still nonsense", "nope")
     res = classify("got charged twice", client=stub, settings=SETTINGS)
-    assert res["fallback"] == "parse_failed" and len(stub.calls) == 2
+    assert res["fallback"] == "parse_failed" and [c["model"] for c in stub.calls] == ["small", "small", "big"]
 
 
 def test_retry_recovers():
@@ -97,3 +98,48 @@ def test_prompt_lists_all_categories_and_no_priority_output():
     for c in ["safety", "account_security", "noise", "payment_issue"]:
         assert c in p
     assert "Do not return a priority" in p
+
+
+HISTORY = {"recent_messages": ["Some days I think everyone would be better without me"], "host_live": None}
+
+
+def test_empty_reply_is_retried_without_sender_history():
+    stub = Stub(None, good("gift_failed_live"))  # None = reply with no text block
+    res = classify("my gift never showed", HISTORY, client=stub, settings=SETTINGS)
+    first, second = (c["messages"][0]["content"] for c in stub.calls)
+    assert "better without me" in first and "better without me" not in second
+    assert res["fallback"] is None and res["category"] == "gift_failed_live"
+
+
+def test_empty_primary_twice_then_backup_succeeds():
+    stub = Stub(None, None, good("gift_failed_live"))
+    res = classify("my gift never showed", HISTORY, client=stub, settings=SETTINGS)
+    assert [c["model"] for c in stub.calls] == ["small", "small", "big"] and res["fallback"] is None
+
+
+def test_all_empty_is_model_empty_not_parse_failed(caplog):
+    stub = Stub(None, None, None)
+    with caplog.at_level("WARNING", logger="classify"):
+        res = classify("my gift never showed", HISTORY, client=stub, settings=SETTINGS)
+    assert res["fallback"] == "model_empty"
+    assert "stop_reason=end_turn" in caplog.text and "better without me" not in caplog.text
+
+
+def test_model_empty_keeps_rule_flags_and_priority_floor():
+    from triage.prioritize import prioritize
+    flagged = classify("im 15 and my gift never showed", HISTORY, client=Stub(None, None, None), settings=SETTINGS)
+    assert flagged["fallback"] == "model_empty" and prioritize(flagged, None, None)[0] == "P0"
+    plain = classify("my gift never showed", HISTORY, client=Stub(None, None, None), settings=SETTINGS)
+    assert prioritize(plain, None, None)[0] == "P1"
+
+
+def test_unreachable_primary_goes_straight_to_backup():
+    stub = Stub(RuntimeError("down"), good())
+    res = classify("my gift never showed", HISTORY, client=stub, settings=SETTINGS)
+    assert [c["model"] for c in stub.calls] == ["small", "big"] and res["fallback"] is None
+
+
+def test_failed_low_confidence_recheck_keeps_first_answer():
+    stub = Stub(good(confidence=0.3), RuntimeError("down"))
+    res = classify("got charged twice", client=stub, settings=SETTINGS)
+    assert res["category"] == "payment_issue" and res["fallback"] == "low_confidence"
