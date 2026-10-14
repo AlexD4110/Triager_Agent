@@ -1,8 +1,8 @@
-# Setup Guide: from zero to a message landing in the database
+# Setup Guide: from zero to a triaged message with a Slack alert
 
-This is the exact sequence needed to get an inbound WhatsApp message stored in Supabase through a Railway-hosted webhook. Placeholders in angle brackets, such as `<your-domain>`, are values you create along the way. Never paste real secrets into chat, screenshots, issues, or commits.
+This is the exact sequence needed to get an inbound WhatsApp message stored in Supabase through a Railway-hosted webhook (Steps 1 to 9), then labeled by the model, given a priority, announced in Slack, and shown on the dashboard (Steps 10 to 16). Placeholders in angle brackets, such as `<your-domain>`, are values you create along the way. Never paste real secrets into chat, screenshots, issues, or commits.
 
-Total time: about one to two hours, most of it Meta setup.
+Total time: about two to three hours, most of it Meta setup.
 
 ## What you need first
 
@@ -11,7 +11,8 @@ Total time: about one to two hours, most of it Meta setup.
 - A Meta account that can create a business portfolio and a developer app
 - A Supabase account (hosted Postgres)
 - A Railway account (hosting)
-- A key for the language model service used by the classifier
+- A key and endpoint address for the language model service used by the classifier (Qwen)
+- A Slack workspace where you can create channels and incoming webhooks
 - A phone with WhatsApp, to send the test message
 
 ## Step 1: Get the code and run the tests
@@ -34,7 +35,7 @@ Copy `.env.example` to `.env`. Every value below goes in `.env` locally, and the
    - Replace the password placeholder with your real **database password**, not an API key.
    - **Remove the square brackets** around the password. The template shows `[YOUR-PASSWORD]`, and the brackets are not part of the password.
    - URL-encode special characters (`@ : / ? # %`). A password of only letters and digits avoids this.
-4. Open the Supabase **SQL editor**, paste the contents of `sql/schema.sql`, and run it once. It creates `raw_payloads`, `messages`, and `jobs`, and turns on row level security with no policies, so Supabase's public API cannot read gifter messages.
+4. Open the Supabase **SQL editor**, paste the contents of `sql/schema.sql`, and run it once. It creates every table the project uses and turns on row level security with no policies, so Supabase's public API cannot read gifter messages. If you already ran an earlier version of this file, run the migrations you are missing instead, in order: `sql/phase3.sql`, `sql/phase4.sql`, `sql/realset.sql`, `sql/phase5.sql`. All are safe to run twice, and the worker fails on every job if its tables are missing.
 5. Test the connection:
 
 ```bash
@@ -191,7 +192,95 @@ with store.connect() as c:
 "
 ```
 
-You should see your message with your real profile name and a current timestamp. The matching row in `jobs` has status `new`, waiting for the worker built in the next phase.
+You should see your message with your real profile name and a current timestamp. The matching row in `jobs` has status `new`, waiting for the worker you set up in Step 13.
+
+## Step 10: Create the Slack alert webhooks
+
+Alerts use Slack incoming webhooks, which are plain URLs created in the browser.
+
+1. Create two channels, for example `#p0-alerts` (reserve it for critical messages, so every ping gets attention) and a team channel.
+2. Go to `api.slack.com/apps`, choose **Create New App, From scratch**, open **Incoming Webhooks**, and switch it on.
+3. Choose **Add New Webhook to Workspace** once per channel and copy each URL (they start with `https://hooks.slack.com/services/`).
+4. Put them in `.env` as `SLACK_P0_WEBHOOK_URL` and `SLACK_TEAM_WEBHOOK_URL`. Optionally add a third for system notices as `SLACK_BUILDER_WEBHOOK_URL`. Treat these URLs as secrets: anyone who has one can post to your channel.
+
+P0 messages post with `@channel` to the first webhook, and P1 messages post with `@here` to the second. P2 and P3 only appear on the dashboard.
+
+## Step 11: Configure the model endpoint
+
+1. Set `QWEN_API_KEY` to your key.
+2. Set `QWEN_BASE_URL` to the chat completions base, which ends in `/compatible-mode/v1`. The code calls `<base>/chat/completions` directly, so the older Anthropic-style address will not work.
+3. Set `CLASSIFIER_MODEL` and `BACKUP_MODEL` to your fast and strong model names. The backup model re-checks low-confidence answers and takes over when the main model fails.
+4. Optionally set `THINKING_MODE` (`on`, `off`, or `budget`; default `budget`) and `BACKUP_THINKING_MODE` (default `on`). Test results on the project's own labeled set showed full thinking off dropped a P0, while `budget` kept P0 recall with lower cost. Change this only after running the evaluation.
+5. Test the endpoint:
+
+```bash
+.venv/bin/python -c "
+from triage.config import get_settings; s = get_settings()
+from triage.qwen import QwenClient
+r = QwenClient(s.api_key, s.base_url).complete(s.classifier_model, 'Reply with one word.', 'Say ok', 50, {'enable_thinking': False})
+print(repr(r.text), r.finish_reason)
+"
+```
+
+Expect `'ok' stop`. An HTTP error here names the problem, such as a wrong key or address.
+
+## Step 12: Load gifter tiers and live hosts
+
+The worker needs a `gifters` table (tier and linked hosts) and a `live_status` table (which hosts are live). Load the invented mock data, or your own:
+
+```bash
+.venv/bin/python -m app.seed                               # mock tiers and live hosts
+.venv/bin/python -m app.seed tier <whatsapp-number> top "Name"   # make a number top-tier
+.venv/bin/python -m app.seed live <host> on                # mark a host live (or off)
+```
+
+A top-tier gifter moves from P2 to P1 and gets a shorter P1 deadline. A live host moves a VIP request to P1 and shortens a failed gift to 10 minutes. Keep `live_status` current: the monitoring silence alert only runs while a host is marked live.
+
+## Step 13: Deploy the worker (second Railway service)
+
+1. In the same Railway project, add a second service from your **private** repository (the worker needs the taxonomy, prompts, and labeled data that the public repository leaves out).
+2. Set its start command to `python -m app.worker`.
+3. Give it these variables: `DATABASE_URL`, `QWEN_API_KEY`, `QWEN_BASE_URL`, `CLASSIFIER_MODEL`, `BACKUP_MODEL`, `SLACK_P0_WEBHOOK_URL`, `SLACK_TEAM_WEBHOOK_URL`. Add `SLACK_BUILDER_WEBHOOK_URL` and the thinking settings if you use them.
+4. Open its logs. You should see `worker started` and no `model_down` or `relation ... does not exist` errors.
+
+## Step 14: Test the triage end to end
+
+From your phone, send these to the test number and check the result. (Your phone is a "standard" tier gifter unless you changed it in Step 12.)
+
+| Message | Expected category | Priority | Slack |
+| --- | --- | --- | --- |
+| Got charged twice for 7,000 coins | payment_issue | P1, 30 min | team channel |
+| Someone is messaging hosts pretending to be me | account_security | P0, 5 min | `#p0-alerts` with @channel |
+| What time does she go live Friday? | general_question | P2, 4 hours | none (dashboard only) |
+| Last night's stream was amazing | positive_feedback | P3 | none |
+
+Then read the results:
+
+```bash
+.venv/bin/python -c "
+from triage.config import load_dotenv; load_dotenv()
+from app import store
+with store.connect() as c:
+    for r in c.execute('select substr(m.text,1,40), r.category, r.priority, r.deadline_minutes, r.alert_status, r.fallback from triage_results r join messages m on m.id = r.message_id order by r.id desc limit 6').fetchall(): print(r)
+"
+```
+
+A `fallback` value of `model_down`, `model_empty`, or `parse_failed` means the model path failed for that message. Anything with a safety or security keyword is P0 regardless of the model.
+
+## Step 15: Open the dashboard
+
+```bash
+.venv/bin/streamlit run dashboard/app.py --server.address localhost
+```
+
+Open `http://localhost:8501`. The queue is sorted by priority then deadline, with overdue items in red. **Mark replied** closes a sender's open items and, together with the worker, drives the repeat-sender rule (3 or more unreplied messages in 10 minutes lifts a message one level, never to P0). **Correct label** records the right answer for review. The dashboard has no login, so keep `--server.address localhost` and never put it on a public address. To look at it with invented data first, run `.venv/bin/python tools/demo_queue.py` and use the command it prints.
+
+## Step 16: Turn on the production safeguards
+
+- **Monitoring** runs inside the worker and needs no setup beyond Slack. It alerts on a stalled queue, on silence while a host is live, and on a model error rate above 5%.
+- **Retention:** run `.venv/bin/python -m app.retention status`. The privacy page promises message text is removed after 90 days. The worker only does this daily if you set `RETENTION_ENABLED=true`, which permanently deletes text, so try `purge` (a dry run) first.
+- **Deletion requests:** when someone emails "Delete my data", run `.venv/bin/python -m app.retention delete-sender <number> --apply` within 30 days and confirm by email.
+- **Real labeled set (optional):** corrections can be turned into a de-identified test set kept in the private database, reviewed by a person on the dashboard's second page. See the README.
 
 ## Troubleshooting
 
@@ -205,10 +294,16 @@ You should see your message with your real profile name and a current timestamp.
 | Messages from your phone are ignored | Phone is not on the **To** list, or you messaged the wrong number | Step 3d and check the **From** number |
 | Graph API says the session has expired | Temporary token expired | Generate a system user token (Step 3f) |
 | Policy URL rejected by Meta | Contact email is still a placeholder | Step 4 |
+| Worker logs `relation ... does not exist`, or every job fails | A migration was not run in Supabase | Run the missing `sql/*.sql` files (Step 2) |
+| Messages get `model_down` | Wrong `QWEN_BASE_URL` (the old Anthropic-style address), a bad key, or the endpoint is down | Steps 11 and the worker logs |
+| Messages get `model_empty` or the model times out | The model spent its whole token budget thinking | Keep `THINKING_MODE=budget` or `off`; the code already retries without history, then the backup model |
+| Alert shows `alert_status = failed` | Slack webhook URL missing or wrong | Step 10; failed alerts are retried automatically |
+| A "silence" notice in Slack on a quiet line | A host is marked live but nobody is messaging | Turn the host off with `app.seed live <host> off` |
+| Dashboard says "Could not load the queue" | `DATABASE_URL` wrong, or the Phase 3 and 4 tables are missing | Step 2 |
 
 ## Keeping private files private
 
-The taxonomy (`categories.yaml`), classifier prompts (`triage/prompts/`), and labeled data (`data/labeled_messages.csv`) are not meant for a public repository. A workable setup is two repositories: a public one with only the code, and a private one that also holds those files and is the one Railway deploys from. The webhook runs without those files. The classifier and priority code, run in the next phase, do need them.
+The taxonomy (`categories.yaml`), classifier prompts (`triage/prompts/`), and labeled data (`data/labeled_messages.csv`) are not meant for a public repository. A workable setup is two repositories: a public one with only the code, and a private one that also holds those files and is the one Railway deploys from. The webhook runs without those files. The worker, the classifier, and the priority code do need them, so deploy the worker from the private repository (Step 13).
 
 ## Security checklist
 
@@ -216,3 +311,5 @@ The taxonomy (`categories.yaml`), classifier prompts (`triage/prompts/`), and la
 - Rotate any secret that was pasted into a chat, a screenshot, or a log.
 - Keep Supabase row level security on. The app connects directly and is unaffected by it.
 - Use synthetic data in tests and fixtures. Never real gifter messages.
+- Run the dashboard on localhost only. It has no login.
+- Slack webhook URLs are secrets. Anyone with one can post to your channel.
