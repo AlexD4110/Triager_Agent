@@ -8,7 +8,7 @@ Reads inbound WhatsApp messages from live-stream gifters, labels each one with a
 | --- | --- | --- |
 | 0 | Taxonomy and labeled dataset | Done (kept local, see below) |
 | 1 | Offline classifier, priority rules, evaluation script | Done |
-| 2 | WhatsApp webhook and storage | Built, being deployed |
+| 2 | WhatsApp webhook and storage | Done |
 | 3 | Worker, Slack alerts, gifter and live-status tables | Not started |
 | 4 | Streamlit queue and correction loop | Not started |
 | 5 | Production monitoring and retention | Not started |
@@ -34,6 +34,8 @@ Gifter (WhatsApp) -> Meta Cloud API -> FastAPI webhook -> Postgres (messages + j
 The taxonomy (`categories.yaml`), the classifier prompts (`triage/prompts/`), and the labeled evaluation data (`data/labeled_messages.csv`) are kept private on purpose. The webhook does not need them. The classifier, `prioritize()`, and `eval.py` do, so you must supply your own copies to run those.
 
 ## Setup
+
+For the full step-by-step path from nothing to a message in the database, including the Meta account setup, see [docs/SETUP.md](docs/SETUP.md).
 
 Requires Python 3.12.
 
