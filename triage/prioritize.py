@@ -1,7 +1,7 @@
 """prioritize(result, gifter, live_status) -> (priority, deadline). Plain code; the model never sets priority.
 
 gifter: {"tier": "top" | other, "unreplied_last_10_min": int}
-live_status: {host name in lower case: True when that host is live}
+live_status: {host name: True when that host is live}; host names match ignoring case and a leading @
 deadline: minutes the team has to respond.
 """
 from typing import Any, Mapping
@@ -13,9 +13,14 @@ DEADLINE_MIN = {"P0": 5, "P1": 30, "P2": 240, "P3": 1440}
 TOP_P1_DEADLINE = 15
 LIVE_GIFT_DEADLINE = 10
 REPEAT_THRESHOLD = 3
-FALLBACK_PRIORITY = {"parse_failed": "P1", "low_confidence": "P2", "model_down": "P2"}
+FALLBACK_PRIORITY = {"parse_failed": "P1", "model_empty": "P1", "low_confidence": "P2", "model_down": "P2"}
 
 _BASE = {name: info["base_priority"] for name, info in load_taxonomy().items()}
+
+
+def _host_key(name: str | None) -> str:
+    """Normalizes a host name so 'Mira', 'MIRA', ' @mira ' all match."""
+    return (name or "").strip().lstrip("@").strip().lower()
 
 
 def _up(priority: str) -> str:
@@ -41,8 +46,9 @@ def prioritize(result: Mapping[str, Any], gifter: Mapping[str, Any] | None,
         priority = _BASE[category]
 
     deadline = DEADLINE_MIN[priority]
-    host = (result.get("mentions_host") or "").lower()
-    host_live = bool(host and live_status.get(host))
+    live = {_host_key(k): v for k, v in live_status.items()}
+    host = _host_key(result.get("mentions_host"))
+    host_live = bool(host and live.get(host))
 
     if gifter.get("tier") == "top":
         if priority == "P2":
