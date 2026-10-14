@@ -5,7 +5,12 @@ from dataclasses import dataclass
 CARD_RE = re.compile(r"\b\d(?:[ -]?\d){12,18}\b")
 SAFETY_RE = re.compile(
     r"kill myself|\bkms\b|suicid|hurt myself|self[- ]?harm|ending it|end it all|end my life"
-    r"|don'?t want to be here|no point|better off without me|hopeless"
+    r"|don'?t want to be here|no point|better (?:off )?without me|(?:happier|better) (?:off )?if i (?:was|were) gone|if i (?:just )?disappear"
+    r"|wish i (?:was|were) (?:dead|gone)|want to die|can'?t go on|no reason to (?:live|go on)|nothing matters"
+    r"|(?:don'?t|do not|dont) see the point (?:anymore|of (?:anything|living|life|going on|it all))"
+    r"|hopeless"
+    r"|no quiero (?:seguir (?:aqu[ií]|viviendo|adelante|as[ií])|vivir|estar aqu[ií])|no veo (?:el )?sentido"
+    r"|(?:me )?quiero morir|matarme|quitarme la vida|hacerme da[nñ]o|mejor sin m[ií]|no vale la pena vivir|acabar con todo"
     r"|tired of everything|don'?t know what i'?ll do"
     r"|\bkill (?:him|her|you|them|that|the)\b|\bhurt (?:you|her|him|them)\b|someone is going to get hurt"
     r"|watch (?:her|his|your) back|find out where \w+ lives|know where you live|show up at (?:her|his|my) house"
@@ -19,6 +24,10 @@ SAFETY_RE = re.compile(
 )
 SECURITY_RE = re.compile(
     r"hack|phish|scam|impersonat|pretending to be|pretends to be|fake (?:account|support|profile)"
+    r"|(?:someone|somebody|they) (?:changed|reset) (?:the|my) (?:email|password|phone)"
+    r"|selling .{0,25} in your name|using my (?:name|username|account|profile)|(?:my|your) (?:name|username) is being used"
+    r"|login from (?:another|a different|an unknown) (?:country|device|location)|unknown (?:device|login)"
+    r"|cheap coins|pay (?:by|in|with) crypto"
     r"|spoof|cloned|login code|verification code|verify my account|2fa|password (?:changed|reset)|knows? my password|account (?:was )?taken"
     r"|someone (?:else )?(?:is )?(?:using|logged)|unauthori[sz]ed|locked out|recovery email"
     r"|hackearon|hackeo|estafa",

@@ -58,7 +58,7 @@ Secrets live in `.env` (never committed). `.env.example` lists the names.
 | `QWEN_API_KEY`, `QWEN_BASE_URL` | Model endpoint for the classifier. The base URL ends in `/compatible-mode/v1`; the app calls `<base>/chat/completions` with the standard library, no model SDK |
 | `CLASSIFIER_MODEL`, `BACKUP_MODEL` | Main and backup model names |
 | `CONFIDENCE_CUTOFF` | Below this confidence the backup model re-checks (default 0.6) |
-| `THINKING_MODE`, `BACKUP_THINKING_MODE` | `on`, `off`, or `budget`: whether the main and backup models reason before answering (default `on`) |
+| `THINKING_MODE`, `BACKUP_THINKING_MODE` | `on`, `off`, or `budget`: whether the main and backup models reason before answering (defaults: main `budget`, backup `on`) |
 | `THINKING_BUDGET`, `MAX_OUTPUT_TOKENS` | Reasoning token cap used by `budget` mode (default 256), and the reply token limit (default 2000) |
 
 ## Database (Supabase)

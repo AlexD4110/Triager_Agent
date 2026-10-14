@@ -150,3 +150,15 @@ def test_thinking_mode_is_sent_per_model():
     classify("got charged twice", client=stub, settings=settings)
     assert stub.calls[0]["thinking"] == {"enable_thinking": False}
     assert stub.calls[1]["thinking"] == {"enable_thinking": True, "thinking_budget": 64}
+
+
+def test_default_thinking_is_budget_for_main_model_and_on_for_backup(monkeypatch):
+    from triage.config import get_settings
+    for name in ("THINKING_MODE", "BACKUP_THINKING_MODE", "THINKING_BUDGET"):
+        monkeypatch.delenv(name, raising=False)
+    s = get_settings()
+    assert (s.thinking_mode, s.backup_thinking_mode, s.thinking_budget) == ("budget", "on", 256)
+    stub = Stub(good(confidence=0.3), good())
+    classify("got charged twice", client=stub, settings=s)
+    assert stub.calls[0]["thinking"] == {"enable_thinking": True, "thinking_budget": 256}
+    assert stub.calls[1]["thinking"] == {"enable_thinking": True}
