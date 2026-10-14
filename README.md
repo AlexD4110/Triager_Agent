@@ -88,6 +88,32 @@ A second test set built from real mistakes, kept in the private database and apa
 
 Run `sql/realset.sql` once in the Supabase SQL editor first. Scores on fewer than about 30 approved examples are not stable.
 
+## Monitoring
+
+The worker checks health every minute and posts to the builder Slack webhook (`SLACK_BUILDER_WEBHOOK_URL`, else the team one). Each condition alerts at most once per cooldown.
+
+- **Stalled queue:** jobs waiting more than 3 minutes (worker down or stuck).
+- **Silence:** nothing triaged for 15 minutes while at least one host is marked live in `live_status`. Keep that table up to date or this alert never fires.
+- **Model errors:** more than 5% of the last hour's results (at least 10) fell back because the model failed.
+
+Thresholds: `MONITOR_STALL_MINUTES`, `MONITOR_SILENCE_MINUTES`, `MONITOR_ERROR_RATE`.
+
+## Retention and deletion
+
+These back the promises on the privacy and data deletion pages. Run `sql/phase5.sql` once in Supabase first.
+
+```bash
+.venv/bin/python -m app.retention status
+.venv/bin/python -m app.retention purge                        # dry run: counts only
+.venv/bin/python -m app.retention purge --apply
+.venv/bin/python -m app.retention delete-sender +15555550107 --apply
+```
+
+- **Purge** removes message text, profile names, the model's summaries, and raw payload copies older than `MESSAGE_RETENTION_DAYS` (default 90, matching the privacy page). Categories, priorities, flags, and timing are kept.
+- **Delete sender** erases one sender's number, name, text, summaries, raw copies, replies, corrections, and gifter record, and logs the request under a keyed hash. Do this within 30 days of an emailed request, then confirm by email.
+- Both commands only count unless you pass `--apply`. The worker runs the purge daily only if `RETENTION_ENABLED=true`.
+- The de-identified real labeled set has no link to a sender, so it is not affected; it expires on its own.
+
 ## Database (Supabase)
 
 1. Create a Supabase project and copy the Postgres connection string (Project Settings, Database).
