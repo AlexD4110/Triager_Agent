@@ -9,7 +9,7 @@ import logging
 import time
 from typing import Any
 
-from app import alerts, jobs
+from app import alerts, jobs, monitor, retention
 from app.store import connect
 from triage.classify import classify, make_client
 from triage.config import Settings, get_settings, load_dotenv
@@ -115,6 +115,26 @@ def retry_alerts(poster: alerts.Poster = alerts.post_slack) -> int:
     return sent
 
 
+def run_retention() -> None:
+    """Daily purge of old message text, only when RETENTION_ENABLED=true. Never takes the worker down."""
+    if not retention.retention_enabled():
+        return
+    try:
+        with connect() as conn:
+            log.info("retention purge: %s", retention.purge_old(conn, apply=True))
+    except Exception:
+        log.exception("retention purge failed")
+
+
+def run_monitor() -> None:
+    """Health checks must never take the worker down."""
+    try:
+        with connect() as conn:
+            monitor.check(conn)
+    except Exception:
+        log.exception("monitor check failed")
+
+
 def main() -> None:
     load_dotenv()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
@@ -122,7 +142,7 @@ def main() -> None:
     if not settings.api_key:
         log.warning("QWEN_API_KEY is not set: every message will get a rules-only label at P2")
     client = make_client(settings)
-    last_housekeeping = 0.0
+    last_housekeeping = last_retention = 0.0
     log.info("worker started")
     while True:
         if time.time() - last_housekeeping > 60:
@@ -132,6 +152,10 @@ def main() -> None:
             if requeued:
                 log.warning("requeued %d stale jobs", requeued)
             retry_alerts()
+            run_monitor()
+        if time.time() - last_retention > 86400:
+            last_retention = time.time()
+            run_retention()
         if not run_one(client, settings):
             time.sleep(1)
 

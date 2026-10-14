@@ -104,6 +104,13 @@ CREATE TABLE IF NOT EXISTS real_labeled_set (
     reviewed_at TEXT,
     expires_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS deletion_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender_hash TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    messages_affected INTEGER NOT NULL
+);
 """
 
 

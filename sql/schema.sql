@@ -115,3 +115,14 @@ CREATE TABLE IF NOT EXISTS real_labeled_set (
 );
 
 ALTER TABLE real_labeled_set ENABLE ROW LEVEL SECURITY;
+
+-- Phase 5 additions
+CREATE TABLE IF NOT EXISTS deletion_log (
+    id BIGSERIAL PRIMARY KEY,
+    sender_hash TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    messages_affected INTEGER NOT NULL
+);
+
+ALTER TABLE deletion_log ENABLE ROW LEVEL SECURITY;
