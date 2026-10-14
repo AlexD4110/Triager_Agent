@@ -83,6 +83,20 @@ def has_recent_safety_flag(conn: Db, wa_from: str, before_id: int, hours: int = 
     return row is not None
 
 
+def unreplied_recent_count(conn: Db, wa_from: str, anchor_iso: str, minutes: int = 10) -> int:
+    """Messages from this sender in the `minutes` up to and including `anchor_iso`, counting only those
+    that arrived after the last time a person marked the sender as replied. Drives the repeat-sender
+    modifier: receive-only code cannot see WhatsApp replies, so the dashboard's Mark replied button
+    is the signal."""
+    anchor = datetime.fromisoformat(anchor_iso)
+    cutoff = (anchor - timedelta(minutes=minutes)).isoformat()
+    last_reply = conn.execute("SELECT MAX(replied_at) FROM replies WHERE wa_from = ?", (wa_from,)).fetchone()[0]
+    since = max(cutoff, last_reply) if last_reply else cutoff
+    row = conn.execute("SELECT COUNT(*) FROM messages WHERE wa_from = ? AND received_at > ? AND received_at <= ?",
+                       (wa_from, since, anchor_iso)).fetchone()
+    return int(row[0])
+
+
 def get_gifter(conn: Db, wa_id: str) -> dict[str, Any] | None:
     rows = fetch_all(conn.execute("SELECT wa_id, name, tier, hosts FROM gifters WHERE wa_id = ?", (wa_id,)))
     return rows[0] if rows else None

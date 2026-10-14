@@ -65,11 +65,13 @@ def run_one(client: Any, settings: Settings, poster: alerts.Poster = alerts.post
             gifter = jobs.get_gifter(conn, message["wa_from"])
             live = jobs.live_map(conn)
             context = build_context(conn, message, gifter, live)
+            repeat_count = jobs.unreplied_recent_count(conn, message["wa_from"], message["received_at"])
         result = label_message(message, context, client, settings)  # slow: no connection held
         if result.get("fallback") in MODEL_FAILURES:
             with connect() as conn:
                 flag_from_history(conn, message, result)
-        priority, deadline = prioritize(result, {"tier": (gifter or {}).get("tier")}, live)
+        priority, deadline = prioritize(
+            result, {"tier": (gifter or {}).get("tier"), "unreplied_last_10_min": repeat_count}, live)
         with connect() as conn:
             result_id, due_at = jobs.save_result(conn, message, result, priority, deadline)
             jobs.finish_job(conn, job["id"], "done")

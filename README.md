@@ -61,6 +61,33 @@ Secrets live in `.env` (never committed). `.env.example` lists the names.
 | `THINKING_MODE`, `BACKUP_THINKING_MODE` | `on`, `off`, or `budget`: whether the main and backup models reason before answering (defaults: main `budget`, backup `on`) |
 | `THINKING_BUDGET`, `MAX_OUTPUT_TOKENS` | Reasoning token cap used by `budget` mode (default 256), and the reply token limit (default 2000) |
 
+## Dashboard (triage queue)
+
+A Streamlit page for the team to work the queue.
+
+```bash
+.venv/bin/streamlit run dashboard/app.py --server.address localhost
+```
+
+- Messages are sorted by priority, then deadline. Overdue items are red, and card numbers are masked on screen.
+- **Mark replied** records that a person answered the sender in WhatsApp. It closes the sender's open items and resets their repeat-message count. The worker lifts a message by one level (never to P0) when a sender has 3 or more unreplied messages in 10 minutes.
+- **Correct label** records the right category and priority in a `corrections` table.
+- Run `sql/phase4.sql` once in the Supabase SQL editor first.
+- There is no login. Run it on your own machine only, never on a public URL, because it shows gifter messages.
+- To try it with invented data and no database setup, run `tools/demo_queue.py` and follow the command it prints.
+
+## Real labeled set
+
+A second test set built from real mistakes, kept in the private database and apart from the synthetic evaluation set.
+
+1. A person fixes a wrong label with **Correct label** on the dashboard.
+2. Weekly, run `.venv/bin/python -m app.realset build` (or press the button on the dashboard's **Real set review** page). It removes emails, links, handles, card and phone numbers, long ids, and the sender's and hosts' names, and stores the result as `pending_review`. The row has no link to the message, the sender, or the time of day, and the correction's free-text note is never copied.
+3. A person reads each example on the review page, edits out anything that could still identify someone, and approves or rejects it. Pattern-based removal cannot find names written in free text, so this review is required, not optional.
+4. `.venv/bin/python eval.py --real` scores only approved examples and keeps its own history. It is never part of the release gate, which stays on the synthetic set.
+5. Rows expire after `REAL_SET_RETENTION_DAYS` (default 365). `.venv/bin/python -m app.realset purge` deletes expired rows.
+
+Run `sql/realset.sql` once in the Supabase SQL editor first. Scores on fewer than about 30 approved examples are not stable.
+
 ## Database (Supabase)
 
 1. Create a Supabase project and copy the Postgres connection string (Project Settings, Database).
