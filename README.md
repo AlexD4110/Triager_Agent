@@ -9,16 +9,16 @@ Reads inbound WhatsApp messages from live-stream gifters, labels each one with a
 | 0 | Taxonomy and labeled dataset | Done (kept local, see below) |
 | 1 | Offline classifier, priority rules, evaluation script | Done |
 | 2 | WhatsApp webhook and storage | Done |
-| 3 | Worker, Slack alerts, gifter and live-status tables | Not started |
-| 4 | Streamlit queue and correction loop | Not started |
-| 5 | Production monitoring and retention | Not started |
+| 3 | Worker, Slack alerts, gifter and live-status tables | Built. The 10-message phone test is still to be run |
+| 4 | Streamlit queue, mark replied, corrections, real labeled set | Built. A full live session worked by a teammate is still to be done |
+| 5 | Production monitoring, retention, deletion | Partly built (monitoring, retention, deletion tools). Still open: a real number and Meta business verification, a non-expiring access token, a written escalation path for self-harm, and a week live with no missed P0 |
 
 ## How it works
 
 ```
 Gifter (WhatsApp) -> Meta Cloud API -> FastAPI webhook -> Postgres (messages + jobs)
                                                               |
-                                                     worker (Phase 3) polls jobs
+                                                     worker polls jobs
                                                               v
                                    rules -> model labels -> prioritize() -> alerts
 ```
@@ -27,6 +27,8 @@ Gifter (WhatsApp) -> Meta Cloud API -> FastAPI webhook -> Postgres (messages + j
 - **Rules** (`triage/rules.py`): masks card numbers, filters noise, and flags safety and security keywords before the model runs. These flags can be added to, never removed.
 - **Classifier** (`triage/classify.py`): the model returns a category, flags, summary, and confidence as JSON, checked with Pydantic. It never returns a priority. If the main model fails or is unsure, it retries without the sender's history, then a backup model runs.
 - **Priority** (`triage/prioritize.py`): plain code turns the label into P0 to P3 and a response deadline. Anything flagged for safety or security is always P0, and modifiers (top-tier gifter, host live, repeat sender) never raise a message to P0.
+- **Worker** (`app/worker.py`): claims jobs, builds context (the sender's last 3 messages, whether their host is live, their tier), runs the rules and the model, calls `prioritize()`, saves the result, and sends Slack alerts. It also runs the health checks (see Monitoring). If every model attempt fails and the sender had a safety flag in the last 24 hours, the message gets the safety flag, so it becomes P0.
+- **Alerts** (`app/alerts.py`): P0 goes to the `#p0-alerts` Slack webhook with @channel, P1 to the team webhook. Alerts carry the model's one-line summary, not the raw message. Failed alerts are recorded and retried.
 - **Receive-only**: the code makes no outbound WhatsApp calls and does not mark messages as read.
 
 ## What is not in this repository
@@ -59,6 +61,11 @@ Secrets live in `.env` (never committed). `.env.example` lists the names.
 | `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID` | Unused until replies exist in Phase 6 |
 | `QWEN_API_KEY`, `QWEN_BASE_URL` | Model endpoint for the classifier. The base URL ends in `/compatible-mode/v1`; the app calls `<base>/chat/completions` with the standard library, no model SDK |
 | `CLASSIFIER_MODEL`, `BACKUP_MODEL` | Main and backup model names |
+| `SLACK_P0_WEBHOOK_URL`, `SLACK_TEAM_WEBHOOK_URL` | Slack incoming webhooks for P0 and P1 alerts |
+| `SLACK_BUILDER_WEBHOOK_URL` | Optional. System notices (model down, monitoring). Falls back to the team webhook |
+| `MESSAGE_RETENTION_DAYS`, `RETENTION_ENABLED` | Days to keep message text (default 90) and whether the worker purges daily (default `false`) |
+| `REAL_SET_RETENTION_DAYS` | How long de-identified real examples are kept (default 365) |
+| `MONITOR_STALL_MINUTES`, `MONITOR_SILENCE_MINUTES`, `MONITOR_ERROR_RATE` | Monitoring thresholds (defaults 3, 15, 0.05) |
 | `CONFIDENCE_CUTOFF` | Below this confidence the backup model re-checks (default 0.6) |
 | `THINKING_MODE`, `BACKUP_THINKING_MODE` | `on`, `off`, or `budget`: whether the main and backup models reason before answering (defaults: main `budget`, backup `on`) |
 | `THINKING_BUDGET`, `MAX_OUTPUT_TOKENS` | Reasoning token cap used by `budget` mode (default 256), and the reply token limit (default 2000) |
@@ -120,13 +127,22 @@ These back the promises on the privacy and data deletion pages. Run `sql/phase5.
 
 1. Create a Supabase project and copy the Postgres connection string (Project Settings, Database).
 2. Put it in `DATABASE_URL` with the real password and **no square brackets** around it. Special characters in the password must be URL-encoded.
-3. Open the Supabase SQL editor, paste `sql/schema.sql`, and run it once. It creates `raw_payloads`, `messages`, and `jobs`, and turns on row level security with no policies so Supabase's public API cannot read gifter messages. The app connects directly as the database owner, which is unaffected.
+3. Open the Supabase SQL editor, paste `sql/schema.sql`, and run it once. It creates every table (`raw_payloads`, `messages`, `jobs`, `gifters`, `live_status`, `triage_results`, `replies`, `corrections`, `real_labeled_set`, `deletion_log`) and turns on row level security with no policies, so Supabase's public API cannot read gifter messages. The app connects directly as the database owner, which is unaffected.
+4. If you already have a database from an earlier phase, run only the migrations you are missing, in order: `sql/phase3.sql`, `sql/phase4.sql`, `sql/realset.sql`, `sql/phase5.sql`. All are safe to run twice. Deploying code before its tables exist makes the worker fail on every job.
+5. Load the mock gifter tiers and live-host flags, or set your own:
+
+```bash
+.venv/bin/python -m app.seed                          # mock tiers and live hosts
+.venv/bin/python -m app.seed live mira on             # mark a host live or off
+.venv/bin/python -m app.seed tier 15551234567 top "Name"   # set one gifter's tier
+```
 
 ## Run locally
 
 ```bash
 .venv/bin/uvicorn app.webhook:app --port 8000
 curl localhost:8000/health
+.venv/bin/python -m app.worker        # in a second terminal: triages messages and sends alerts
 ```
 
 ## Deploy to Railway
@@ -137,6 +153,15 @@ curl localhost:8000/health
 4. Under **Settings, Networking**, choose **Generate Domain** to get a public HTTPS URL.
 5. Check `https://<your-domain>/health`. It should return `{"status":"ok"}`.
 6. Local SQLite is wiped on every Railway deploy, so use `DATABASE_URL` (Supabase) for anything you want to keep.
+
+### The worker (second Railway service)
+
+The worker classifies messages and sends alerts, and it runs as its own service.
+
+1. Add a second service to the same Railway project from the same repository, with the start command `python -m app.worker`.
+2. It needs the taxonomy, prompts, and labeled-data files, which this public repository does not contain. Deploy it from a private repository that includes them (see "What is not in this repository").
+3. Give it the same `DATABASE_URL`, plus `QWEN_API_KEY`, `QWEN_BASE_URL`, `CLASSIFIER_MODEL`, `BACKUP_MODEL`, `SLACK_P0_WEBHOOK_URL`, and `SLACK_TEAM_WEBHOOK_URL`. Optionally `SLACK_BUILDER_WEBHOOK_URL` and the thinking settings.
+4. After the deploy, the logs should show `worker started` with no `model_down` warnings, and a test message should get a category and priority.
 
 ## Register the webhook with Meta
 
@@ -151,4 +176,6 @@ A GET request with the wrong verify token returns 403, and a POST with a missing
 
 - Never commit `.env`. It is listed in `.gitignore`.
 - All test data and fixtures must be synthetic. Card numbers are masked before any text reaches the model.
-- Messages can contain names, spend, and payment details. Plan a retention limit before going live.
+- Messages can contain names, spend, and payment details. Message text is removed after 90 days by `app.retention` (see Retention and deletion); the automatic purge is off until you set `RETENTION_ENABLED=true`.
+- The dashboard has no login. Run it only on your own machine with `--server.address localhost`.
+- Rotate any secret that was pasted into chat, a screenshot, or a log.
