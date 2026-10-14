@@ -1,6 +1,10 @@
-"""Runs classify + prioritize over data/labeled_messages.csv; prints accuracy, P0 recall, confusion table.
+"""Runs classify + prioritize over a labeled set; prints accuracy, P0 recall, confusion table.
 
-Usage: python eval.py [--limit N]. Needs QWEN_API_KEY and QWEN_BASE_URL (see .env.example).
+    python eval.py [--limit N]          the synthetic set, data/labeled_messages.csv (the release gate)
+    python eval.py --real [--limit N]   the approved, de-identified real set from the private database
+
+The real set is kept apart from the synthetic one: its results go in their own history, and it is never
+exported to a file. Needs QWEN_API_KEY and QWEN_BASE_URL (see .env.example).
 """
 import argparse
 import csv
@@ -34,13 +38,26 @@ def score(rows: list[dict[str, str]], results: list[dict]) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--real", action="store_true", help="score the approved real set instead of the CSV")
     args = ap.parse_args()
+    which = "real" if args.real else "synthetic"
     settings = get_settings()
     if not settings.api_key or not settings.base_url:
         print("Set QWEN_API_KEY and QWEN_BASE_URL in .env (see .env.example).", file=sys.stderr)
         return 2
-    with (ROOT / "data" / "labeled_messages.csv").open(encoding="utf-8", newline="") as f:
-        rows = list(csv.DictReader(f))
+    if args.real:
+        from app import realset
+        from app.store import connect
+        with connect() as conn:
+            rows = realset.approved(conn)
+        if not rows:
+            print("The real set has no approved examples yet. Build and review some first (see README).")
+            return 2
+        if len(rows) < realset.MIN_ROWS_FOR_STABLE_SCORE:
+            print(f"Note: only {len(rows)} approved examples; scores this small are not stable.\n")
+    else:
+        with (ROOT / "data" / "labeled_messages.csv").open(encoding="utf-8", newline="") as f:
+            rows = list(csv.DictReader(f))
     if args.limit:
         rows = rows[: args.limit]
     with ThreadPoolExecutor(8) as pool:
@@ -48,9 +65,10 @@ def main() -> int:
     s = score(rows, results)
 
     history = json.loads(HISTORY.read_text()) if HISTORY.exists() else []
-    prev = history[-1] if history else None
+    same_set = [h for h in history if h.get("set", "synthetic") == which]
+    prev = same_set[-1] if same_set else None
     fmt = lambda v: f"{v:.1%}"
-    print(f"rows: {s['rows']}")
+    print(f"set: {which}, rows: {s['rows']}")
     print(f"category accuracy: {fmt(s['category_accuracy'])}  (previous: {fmt(prev['category_accuracy']) if prev else 'none'})")
     print(f"P0 recall:         {fmt(s['p0_recall'])}  (previous: {fmt(prev['p0_recall']) if prev else 'none'})")
     print("\nconfusion (expected -> predicted: count):")
@@ -60,7 +78,7 @@ def main() -> int:
     print("\nGATE:", "GREEN" if green else "RED")
 
     if not args.limit:
-        history.append({"at": datetime.now(timezone.utc).isoformat(), "model": settings.classifier_model,
+        history.append({"at": datetime.now(timezone.utc).isoformat(), "model": settings.classifier_model, "set": which,
                         "category_accuracy": s["category_accuracy"], "p0_recall": s["p0_recall"]})
         HISTORY.write_text(json.dumps(history, indent=2))
     return 0 if green else 1

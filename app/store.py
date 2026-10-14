@@ -71,6 +71,39 @@ CREATE TABLE IF NOT EXISTS triage_results (
     alert_attempts INTEGER NOT NULL DEFAULT 0,
     alert_error TEXT
 );
+CREATE TABLE IF NOT EXISTS replies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wa_from TEXT NOT NULL,
+    replied_at TEXT NOT NULL,
+    marked_by TEXT
+);
+CREATE INDEX IF NOT EXISTS replies_sender ON replies (wa_from, replied_at);
+CREATE TABLE IF NOT EXISTS corrections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id),
+    original_category TEXT,
+    original_priority TEXT,
+    corrected_category TEXT NOT NULL,
+    corrected_priority TEXT NOT NULL,
+    note TEXT,
+    corrected_by TEXT,
+    corrected_at TEXT NOT NULL,
+    exported_at TEXT
+);
+CREATE TABLE IF NOT EXISTS real_labeled_set (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    text_deid TEXT NOT NULL,
+    text_hash TEXT NOT NULL UNIQUE,
+    category TEXT NOT NULL,
+    priority TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending_review',
+    residual TEXT NOT NULL DEFAULT '',
+    created_week TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    reviewed_by TEXT,
+    reviewed_at TEXT,
+    expires_at TEXT NOT NULL
+);
 """
 
 
