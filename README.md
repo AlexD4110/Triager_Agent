@@ -25,7 +25,7 @@ Gifter (WhatsApp) -> Meta Cloud API -> FastAPI webhook -> Postgres (messages + j
 
 - **Webhook** (`app/webhook.py`): verifies Meta's signature, saves the raw payload, ignores a message ID (`wamid`) it has seen before, and returns 200 right away. No model calls happen here.
 - **Rules** (`triage/rules.py`): masks card numbers, filters noise, and flags safety and security keywords before the model runs. These flags can be added to, never removed.
-- **Classifier** (`triage/classify.py`): the model returns a category, flags, summary, and confidence as JSON, checked with Pydantic. It never returns a priority. If the main model fails or is unsure, a backup model runs.
+- **Classifier** (`triage/classify.py`): the model returns a category, flags, summary, and confidence as JSON, checked with Pydantic. It never returns a priority. If the main model fails or is unsure, it retries without the sender's history, then a backup model runs.
 - **Priority** (`triage/prioritize.py`): plain code turns the label into P0 to P3 and a response deadline. Anything flagged for safety or security is always P0, and modifiers (top-tier gifter, host live, repeat sender) never raise a message to P0.
 - **Receive-only**: the code makes no outbound WhatsApp calls and does not mark messages as read.
 
@@ -55,9 +55,11 @@ Secrets live in `.env` (never committed). `.env.example` lists the names.
 | `DATABASE_URL` | Supabase Postgres connection string. If empty, local SQLite is used |
 | `SQLITE_PATH` | SQLite file for local development (default `data/triage.db`) |
 | `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID` | Unused until replies exist in Phase 6 |
-| `QWEN_API_KEY`, `QWEN_BASE_URL` | Model endpoint for the classifier |
+| `QWEN_API_KEY`, `QWEN_BASE_URL` | Model endpoint for the classifier. The base URL ends in `/compatible-mode/v1`; the app calls `<base>/chat/completions` with the standard library, no model SDK |
 | `CLASSIFIER_MODEL`, `BACKUP_MODEL` | Main and backup model names |
 | `CONFIDENCE_CUTOFF` | Below this confidence the backup model re-checks (default 0.6) |
+| `THINKING_MODE`, `BACKUP_THINKING_MODE` | `on`, `off`, or `budget`: whether the main and backup models reason before answering (defaults: main `budget`, backup `on`) |
+| `THINKING_BUDGET`, `MAX_OUTPUT_TOKENS` | Reasoning token cap used by `budget` mode (default 256), and the reply token limit (default 2000) |
 
 ## Database (Supabase)
 

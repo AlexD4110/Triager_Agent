@@ -16,6 +16,7 @@ from triage.config import Settings, get_settings, load_dotenv
 from triage.prioritize import prioritize
 
 log = logging.getLogger("worker")
+MODEL_FAILURES = {"parse_failed", "model_empty", "model_down"}
 NOISE_TYPES = {"sticker", "reaction"}  # no words to read, treated like emoji-only noise
 MODEL_DOWN_NOTICE_EVERY = 900  # seconds between "model unreachable" notices
 _last_notice = 0.0
@@ -42,6 +43,16 @@ def build_context(conn: Any, message: dict[str, Any], gifter: dict[str, Any] | N
     return {"recent_messages": jobs.recent_texts(conn, message["wa_from"], message["id"]), "host_live": host_live}
 
 
+def flag_from_history(conn: Any, message: dict[str, Any], result: dict[str, Any]) -> None:
+    """When every model attempt failed, a sender with a recent safety flag gets the safety flag too, so the
+    safety floor makes the message P0. This is a flag added by the rule layer, not a priority modifier, and
+    it is only ever added. It applies to model failures only, never to a normal result."""
+    if jobs.has_recent_safety_flag(conn, message["wa_from"], message["id"]):
+        result["safety_flag"] = True
+        result["summary"] = "Model failed; sender had a recent safety flag. Treat as urgent."
+        log.warning("message %s: model failed and sender has a recent safety flag -> safety flag set", message["id"])
+
+
 def run_one(client: Any, settings: Settings, poster: alerts.Poster = alerts.post_slack) -> bool:
     """Processes one job. Returns False when there was nothing to do."""
     with connect() as conn:
@@ -55,6 +66,9 @@ def run_one(client: Any, settings: Settings, poster: alerts.Poster = alerts.post
             live = jobs.live_map(conn)
             context = build_context(conn, message, gifter, live)
         result = label_message(message, context, client, settings)  # slow: no connection held
+        if result.get("fallback") in MODEL_FAILURES:
+            with connect() as conn:
+                flag_from_history(conn, message, result)
         priority, deadline = prioritize(result, {"tier": (gifter or {}).get("tier")}, live)
         with connect() as conn:
             result_id, due_at = jobs.save_result(conn, message, result, priority, deadline)

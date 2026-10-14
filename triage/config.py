@@ -24,7 +24,11 @@ class Settings:
     backup_model: str = "qwen3.8-max"  # empty string means no backup pass
     confidence_cutoff: float = 0.6
     api_key: str = ""
-    base_url: str = ""
+    base_url: str = ""  # e.g. https://<host>/compatible-mode/v1
+    thinking_mode: str = "budget"  # on | off | budget, for the main model
+    backup_thinking_mode: str = "on"  # same choices, for the backup model
+    thinking_budget: int = 256  # reasoning token cap when a mode is "budget"
+    max_tokens: int = 2000
 
 
 def get_settings() -> Settings:
@@ -35,6 +39,10 @@ def get_settings() -> Settings:
         confidence_cutoff=float(os.environ.get("CONFIDENCE_CUTOFF", "0.6")),
         api_key=os.environ.get("QWEN_API_KEY", ""),
         base_url=os.environ.get("QWEN_BASE_URL", ""),
+        thinking_mode=os.environ.get("THINKING_MODE", "budget"),
+        backup_thinking_mode=os.environ.get("BACKUP_THINKING_MODE", "on"),
+        thinking_budget=int(os.environ.get("THINKING_BUDGET", "256")),
+        max_tokens=int(os.environ.get("MAX_OUTPUT_TOKENS", "2000")),
     )
 
 

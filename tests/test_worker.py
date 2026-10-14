@@ -1,10 +1,11 @@
 import json
-from types import SimpleNamespace
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from app import alerts, jobs, seed, store, worker
 from triage.config import ROOT, Settings
+from triage.qwen import Reply
 
 SETTINGS = Settings("small", "big", 0.6)
 
@@ -14,14 +15,14 @@ class Model:
 
     def __init__(self, *replies):
         self.replies, self.calls = list(replies), []
-        self.messages = self
 
-    def create(self, **kw):
-        self.calls.append(kw)
+    def complete(self, model, system, user, max_tokens=2000, thinking=None):
+        self.calls.append({"model": model, "user": user, "thinking": thinking})
         item = self.replies.pop(0) if self.replies else RuntimeError("no reply queued")
         if isinstance(item, Exception):
             raise item
-        return SimpleNamespace(content=[SimpleNamespace(type="text", text=item)])
+        return Reply(text=item or "", finish_reason="stop", prompt_tokens=10, output_tokens=7,
+                     reasoning_tokens=0, seconds=0.0)
 
 
 def label(category, confidence=0.9, **kw):
@@ -177,7 +178,7 @@ def test_context_includes_recent_messages_and_host_live():
     model = Model(label("general_question"), label("general_question"), label("gift_failed_live"))
     for _ in range(3):
         run(model)
-    prompt = model.calls[2]["messages"][0]["content"]
+    prompt = model.calls[2]["user"]
     assert "- first" in prompt and "- second" in prompt and "Host live now: yes" in prompt
 
 
@@ -213,3 +214,71 @@ def test_each_message_triaged_once():
 def test_worker_makes_no_whatsapp_calls():
     src = open(worker.__file__).read() + open(jobs.__file__).read() + open(alerts.__file__).read()
     assert "graph.facebook.com" not in src and "WHATSAPP_ACCESS_TOKEN" not in src
+
+
+def process_all(model, slack=None):
+    slack = slack or Slack()
+    while worker.run_one(model, SETTINGS, slack):
+        pass
+    return slack
+
+
+def age_message(wamid, hours):
+    old = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    with store.connect() as c:
+        c.execute("UPDATE messages SET received_at = ? WHERE wamid = ?", (old, wamid))
+
+
+def test_failed_model_plus_recent_safety_flag_is_p0():
+    add_message("h1", "15555550107", "kms")  # rule flag
+    process_all(Model(label("safety")))
+    add_message("h2", "15555550107", "my gift never showed")
+    slack = process_all(Model(*[label("gift_failed_live")] * 0, *[""] * 3))  # three empty replies
+    r = result_for("h2")
+    assert (r["fallback"], r["priority"], r["safety_flag"], r["deadline_minutes"]) == ("model_empty", "P0", 1, 5)
+    assert slack.sent[-1][0] == "https://slack.test/p0" and "recent safety flag" in slack.sent[-1][1]
+
+
+def test_history_flag_ignored_when_model_works():
+    add_message("h3", "15555550107", "kms")
+    process_all(Model(label("safety")))
+    add_message("h4", "15555550107", "what time is the stream")
+    process_all(Model(label("general_question")))
+    r = result_for("h4")
+    assert (r["priority"], r["safety_flag"], r["fallback"]) == ("P2", 0, None)
+
+
+def test_old_safety_flag_does_not_count():
+    add_message("h5", "15555550107", "kms")
+    process_all(Model(label("safety")))
+    age_message("h5", 25)
+    add_message("h6", "15555550107", "my gift never showed")
+    process_all(Model(*[""] * 3))
+    r = result_for("h6")
+    assert (r["priority"], r["safety_flag"], r["fallback"]) == ("P1", 0, "model_empty")
+
+
+def test_other_senders_flags_do_not_count():
+    add_message("h7", "15555550107", "kms")
+    process_all(Model(label("safety")))
+    add_message("h8", "15555550109", "my gift never showed")
+    process_all(Model(*[""] * 3))
+    assert result_for("h8")["priority"] == "P1"
+
+
+def test_history_flag_from_a_failed_result_does_not_propagate():
+    add_message("h9", "15555550107", "my gift never showed")
+    process_all(Model(*[""] * 3))  # failed, no flag, P1
+    with store.connect() as c:  # pretend that result had been flagged by a fallback
+        c.execute("UPDATE triage_results SET safety_flag = 1")
+    add_message("h10", "15555550107", "hello again")
+    process_all(Model(*[""] * 3))
+    assert result_for("h10")["priority"] == "P1"
+
+
+def test_model_down_with_recent_flag_is_also_p0():
+    add_message("h11", "15555550107", "kms")
+    process_all(Model(label("safety")))
+    add_message("h12", "15555550107", "hello there")
+    process_all(Model(*[RuntimeError("down")] * 2))
+    assert result_for("h12")["priority"] == "P0"
